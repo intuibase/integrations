@@ -21,7 +21,10 @@ state:
   management_api_key: {{management_api_key}}
   initial_interval: {{initial_interval}}
   finalization_delay: {{finalization_delay}}
-  dimensions: {{dimensions}}
+  dimensions:
+  {{#each dimensions as |dim|}}
+    - {{dim}}
+  {{/each}}
   # Hard cap on backfill depth: 31 days (31 * 24h). Although the 31-day API span
   # limit applies to latency/throughput metrics and many dimensions, the windowing
   # loop issues 24-hour requests, so the query span never exceeds 24h. The lookback

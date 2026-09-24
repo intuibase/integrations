@@ -21,7 +21,10 @@ state:
   management_api_key: {{management_api_key}}
   initial_interval: {{initial_interval}}
   finalization_delay: {{finalization_delay}}
-  dimensions: {{dimensions}}
+  dimensions:
+  {{#each dimensions as |dim|}}
+    - {{dim}}
+  {{/each}}
   # Hard cap on backfill depth. The Analytics API supports up to 365 days for
   # daily granularity with long-window dimensions (model, provider, etc.).
   # Provider and similar dimensions cap the query *span* at 31 days, but the

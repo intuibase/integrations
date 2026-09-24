@@ -1,0 +1,140 @@
+config_version: 2
+interval: {{interval}}
+{{#if enable_request_tracer}}
+resource.tracer.filename: "../../logs/cel/http-request-trace-*.ndjson"
+resource.tracer.maxbackups: 5
+{{/if}}
+{{#if proxy_url}}
+resource.proxy_url: {{proxy_url}}
+{{/if}}
+{{#if ssl}}
+resource.ssl: {{ssl}}
+{{/if}}
+{{#if http_client_timeout}}
+resource.timeout: {{http_client_timeout}}
+{{/if}}
+resource.url: {{url}}/analytics/query
+# OpenRouter Analytics API rate limit: 64 req/min. Use 1/s (=60/min) to stay safe.
+resource.rate_limit.limit: 1
+resource.rate_limit.burst: 5
+state:
+  management_api_key: {{management_api_key}}
+  initial_interval: {{initial_interval}}
+  finalization_delay: {{finalization_delay}}
+  dimensions: {{dimensions}}
+  # Hard cap on backfill depth: 31 days (31 * 24h). Although the 31-day API span
+  # limit applies to latency/throughput metrics and many dimensions, the windowing
+  # loop issues 24-hour requests, so the query span never exceeds 24h. The lookback
+  # limits how far into the past backfill goes on first run.
+  max_lookback: "744h"
+  # Each request covers exactly 24 hours (1 API call = 24 hourly buckets).
+  window_span: "24h"
+redact:
+  fields:
+    - management_api_key
+program: |
+  // Performance stream: hourly non-additive metrics (latency, throughput, cache rate)
+  // grouped by model and provider. Each request covers exactly 24 hours, keeping the
+  // query span well within the Analytics API's 31-day limit for these metrics.
+  state.with(
+    (now - duration(state.finalization_delay))
+      .format(time_layout.DateOnly)
+      .parse_time(time_layout.DateOnly).as(today,
+        max(
+          state.?cursor.last_end.optMap(ts, timestamp(ts)).orValue(
+            now - duration(state.initial_interval)
+          ).format(time_layout.DateOnly).parse_time(time_layout.DateOnly),
+          today - duration(state.max_lookback)
+        ).as(start,
+          {
+            "today": today,
+            "start": start,
+            "end": min(start + duration(state.window_span), today),
+          }
+        )
+      ).as(w,
+        // If we've caught up to today, stop and wait for the next scheduled run.
+        w.start >= w.today ?
+          {
+            "events": [],
+            "want_more": false,
+          }
+        :
+          request("POST", state.url).with({
+            "Header": {
+              "Authorization": ["Bearer " + state.management_api_key],
+              "Content-Type": ["application/json"],
+            },
+            "Body": {
+              "time_range": {
+                "start": w.start.format(time_layout.RFC3339),
+                "end": w.end.format(time_layout.RFC3339),
+              },
+              "granularity": "hour",
+              "dimensions": state.dimensions,
+              "metrics": [
+                "p50_latency",
+                "p90_latency",
+                "p99_latency",
+                "p50_total_time_to_first_token",
+                "p99_total_time_to_first_token",
+                "p50_throughput",
+                "p99_throughput",
+                "cache_hit_rate",
+                "guardrail_invoked_rate",
+                "response_cached_rate",
+              ],
+              "limit": 10000,
+            }.encode_json(),
+          }).do_request().as(resp,
+            resp.StatusCode == 200 ?
+              resp.Body.decode_json().as(body,
+                body.?data.?data.orValue([]).as(rows,
+                  // Emit a sentinel event for empty windows so the cursor advances
+                  // and backfill is not stalled. The drop_event processor below
+                  // discards it before ingest.
+                  (size(rows) == 0 ?
+                    [{"message": "{\"_fake\":true}"}]
+                  :
+                    rows.map(row, {"message": row.encode_json()})
+                  ).as(events, {
+                    "events": events,
+                    "cursor": {"last_end": w.end.format(time_layout.RFC3339)},
+                    "want_more": w.end < w.today,
+                  })
+                )
+              )
+            :
+              {
+                "events": {
+                  "error": {
+                    "code": string(resp.StatusCode),
+                    "id": string(resp.Status),
+                    "message": "POST /analytics/query: " + (
+                      size(resp.Body) != 0 ?
+                        string(resp.Body)
+                      :
+                        string(resp.Status) + " (" + string(resp.StatusCode) + ")"
+                    ),
+                  },
+                },
+                "want_more": false,
+              }
+          )
+      )
+  )
+tags:
+{{#if preserve_original_event}}
+  - preserve_original_event
+{{/if}}
+{{#each tags as |tag|}}
+  - {{tag}}
+{{/each}}
+{{#contains "forwarded" tags}}
+publisher_pipeline.disable_host: true
+{{/contains}}
+processors:
+  - drop_event.when.contains.message: '"_fake":true'
+{{#if processors}}
+{{processors}}
+{{/if}}

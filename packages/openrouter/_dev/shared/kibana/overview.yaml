@@ -1,0 +1,193 @@
+dashboards:
+  - name: "[OpenRouter] Overview"
+    id: "openrouter-overview-f0a1b2c3-d4e5-6789-abcd-ef0123456789"
+    description: >-
+      Cross-provider visibility into OpenRouter API usage, cost, and token consumption.
+      Covers request volume, spend by model and provider, token breakdown, and cache
+      efficiency. Data sourced from metrics-openrouter.usage-*.
+    time_range:
+      from: now-7d
+      to: now
+    panels:
+      # Header
+      - title: ""
+        hide_title: true
+        size: {w: 48, h: 3}
+        markdown:
+          content: |
+            ## OpenRouter — Usage & Cost Overview
+            Daily request volume, token consumption, and cost broken down by model and provider.
+            Data is collected once per day per model/provider combination. Use the time picker to adjust the window.
+
+      # KPI row
+      - title: "Total Requests"
+        size: {w: 12, h: 5}
+        esql:
+          type: metric
+          query: |
+            FROM metrics-openrouter.usage-*
+            | WHERE openrouter.usage.request_count IS NOT NULL
+            | STATS `Total Requests` = SUM(openrouter.usage.request_count)
+          primary:
+            field: "Total Requests"
+
+      - title: "Total Cost (USD)"
+        size: {w: 12, h: 5}
+        esql:
+          type: metric
+          query: |
+            FROM metrics-openrouter.usage-*
+            | WHERE openrouter.usage.total_usage IS NOT NULL
+            | STATS `Total Cost (USD)` = ROUND(SUM(openrouter.usage.total_usage), 4)
+          primary:
+            field: "Total Cost (USD)"
+
+      - title: "Total Tokens"
+        size: {w: 12, h: 5}
+        esql:
+          type: metric
+          query: |
+            FROM metrics-openrouter.usage-*
+            | WHERE openrouter.usage.tokens_total IS NOT NULL
+            | STATS `Total Tokens` = SUM(openrouter.usage.tokens_total)
+          primary:
+            field: "Total Tokens"
+
+      - title: "Cache Efficiency"
+        size: {w: 12, h: 5}
+        esql:
+          type: metric
+          query: |
+            FROM metrics-openrouter.usage-*
+            | WHERE openrouter.usage.tokens_total IS NOT NULL AND openrouter.usage.cached_tokens IS NOT NULL
+            | STATS total_tokens = SUM(openrouter.usage.tokens_total), cached_tokens = SUM(openrouter.usage.cached_tokens)
+            | EVAL `Cache Hit %` = ROUND(100.0 * cached_tokens / total_tokens, 1)
+            | KEEP `Cache Hit %`
+          primary:
+            field: "Cache Hit %"
+
+      # Daily request volume over time
+      - title: "Daily Request Volume by Model"
+        size: {w: 48, h: 12}
+        esql:
+          type: bar
+          query: |
+            FROM metrics-openrouter.usage-*
+            | WHERE openrouter.usage.request_count IS NOT NULL AND openrouter.usage.model IS NOT NULL
+            | STATS requests = SUM(openrouter.usage.request_count)
+              BY time_bucket = BUCKET(@timestamp, 20, ?_tstart, ?_tend), model = openrouter.usage.model
+            | SORT time_bucket ASC
+          dimension:
+            field: "time_bucket"
+          metrics:
+            - field: "requests"
+              label: "Requests"
+          breakdown:
+            field: "model"
+          mode: stacked
+
+      # Cost breakdown
+      - title: "Daily Cost by Model"
+        size: {w: 24, h: 12}
+        esql:
+          type: bar
+          query: |
+            FROM metrics-openrouter.usage-*
+            | WHERE openrouter.usage.total_usage IS NOT NULL AND openrouter.usage.model IS NOT NULL
+            | STATS cost_usd = ROUND(SUM(openrouter.usage.total_usage), 4)
+              BY time_bucket = BUCKET(@timestamp, 20, ?_tstart, ?_tend), model = openrouter.usage.model
+            | SORT time_bucket ASC
+          dimension:
+            field: "time_bucket"
+          metrics:
+            - field: "cost_usd"
+              label: "Cost (USD)"
+          breakdown:
+            field: "model"
+          mode: stacked
+
+      - title: "Cost Share by Provider"
+        size: {w: 24, h: 12}
+        esql:
+          type: pie
+          query: |
+            FROM metrics-openrouter.usage-*
+            | WHERE openrouter.usage.total_usage IS NOT NULL AND openrouter.usage.provider IS NOT NULL
+            | STATS cost_usd = ROUND(SUM(openrouter.usage.total_usage), 4) BY provider = openrouter.usage.provider
+            | SORT cost_usd DESC
+            | LIMIT 20
+          metrics:
+            - field: "cost_usd"
+              label: "Cost (USD)"
+          breakdowns:
+            - field: "provider"
+
+      # Token breakdown
+      - title: "Token Consumption: Prompt vs Completion"
+        size: {w: 24, h: 12}
+        esql:
+          type: bar
+          query: |
+            FROM metrics-openrouter.usage-*
+            | WHERE openrouter.usage.tokens_prompt IS NOT NULL AND openrouter.usage.tokens_completion IS NOT NULL
+            | STATS prompt_tokens = SUM(openrouter.usage.tokens_prompt),
+                    completion_tokens = SUM(openrouter.usage.tokens_completion)
+              BY time_bucket = BUCKET(@timestamp, 20, ?_tstart, ?_tend)
+            | SORT time_bucket ASC
+          dimension:
+            field: "time_bucket"
+          metrics:
+            - field: "prompt_tokens"
+              label: "Prompt Tokens"
+            - field: "completion_tokens"
+              label: "Completion Tokens"
+          mode: stacked
+
+      - title: "Cached Tokens Over Time"
+        size: {w: 24, h: 12}
+        esql:
+          type: bar
+          query: |
+            FROM metrics-openrouter.usage-*
+            | WHERE openrouter.usage.cached_tokens IS NOT NULL
+            | STATS cached_tokens = SUM(openrouter.usage.cached_tokens),
+                    total_tokens = SUM(openrouter.usage.tokens_total)
+              BY time_bucket = BUCKET(@timestamp, 20, ?_tstart, ?_tend)
+            | SORT time_bucket ASC
+          dimension:
+            field: "time_bucket"
+          metrics:
+            - field: "cached_tokens"
+              label: "Cached Tokens"
+            - field: "total_tokens"
+              label: "Total Tokens"
+          mode: unstacked
+
+      # Top models table
+      - title: "Top Models by Cost"
+        size: {w: 48, h: 12}
+        esql:
+          type: datatable
+          query: |
+            FROM metrics-openrouter.usage-*
+            | WHERE openrouter.usage.model IS NOT NULL
+            | STATS
+                requests = SUM(openrouter.usage.request_count),
+                prompt_tokens = SUM(openrouter.usage.tokens_prompt),
+                completion_tokens = SUM(openrouter.usage.tokens_completion),
+                cost_usd = ROUND(SUM(openrouter.usage.total_usage), 4)
+              BY model = openrouter.usage.model, provider = openrouter.usage.provider
+            | SORT cost_usd DESC
+            | LIMIT 20
+          metrics:
+            - field: "requests"
+              label: "Requests"
+            - field: "prompt_tokens"
+              label: "Prompt Tokens"
+            - field: "completion_tokens"
+              label: "Completion Tokens"
+            - field: "cost_usd"
+              label: "Cost (USD)"
+          breakdowns:
+            - field: "model"
+            - field: "provider"
